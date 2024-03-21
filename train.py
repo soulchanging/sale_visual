@@ -21,14 +21,15 @@ import utils
 from logger import Logger
 from replay_buffer import ReplayBufferStorage, make_replay_loader
 from video import TrainVideoRecorder, VideoRecorder
-
+import buffer
 torch.backends.cudnn.benchmark = True
+import TD7
 
 
-def make_agent(obs_spec, action_spec, cfg):
-    cfg.obs_shape = obs_spec.shape
-    cfg.action_shape = action_spec.shape
-    return hydra.utils.instantiate(cfg)
+# def make_agent(obs_spec, action_spec, cfg):
+#     cfg.obs_shape = obs_spec.shape
+#     cfg.action_shape = action_spec.shape
+#     return hydra.utils.instantiate(cfg)
 
 
 class Workspace:
@@ -40,10 +41,12 @@ class Workspace:
         utils.set_seed_everywhere(cfg.seed)
         self.device = torch.device(cfg.device)
         self.setup()
+        action_shape = self.train_env.action_spec().shape[0]
+        obs_shape = self.train_env.observation_spec().shape
+        max_action = self.train_env.action_spec().maximum
+        print(action_shape,obs_shape,max_action)
+        self.agent = TD7.Agent(obs_shape, action_shape,self.device,max_action)
 
-        self.agent = make_agent(self.train_env.observation_spec(),
-                                self.train_env.action_spec(),
-                                self.cfg.agent)
         self.timer = utils.Timer()
         self._global_step = 0
         self._global_episode = 0
@@ -61,9 +64,12 @@ class Workspace:
                       self.train_env.action_spec(),
                       specs.Array((1,), np.float32, 'reward'),
                       specs.Array((1,), np.float32, 'discount'))
+        action_shape = self.train_env.action_spec().shape
+        obs_shape = self.train_env.observation_spec().shape
 
         self.replay_storage = ReplayBufferStorage(data_specs,
                                                   self.work_dir / 'buffer')
+
 
         self.replay_loader = make_replay_loader(
             self.work_dir / 'buffer', self.cfg.replay_buffer_size,
@@ -104,9 +110,11 @@ class Workspace:
             self.video_recorder.init(self.eval_env, enabled=(episode == 0))
             while not time_step.last():
                 with torch.no_grad(), utils.eval_mode(self.agent):
-                    action = self.agent.act(time_step.observation,
-                                            self.global_step,
-                                            eval_mode=True)
+                    # action = self.agent.act(time_step.observation,
+                    #                         self.global_step,
+                    #                         eval_mode=True)
+                    
+                    action = self.agent.select_action(time_step.observation, self.cfg.use_checkpoints,use_exploration=False)
                 time_step = self.eval_env.step(action)
                 self.video_recorder.record(self.eval_env)
                 total_reward += time_step.reward
@@ -132,6 +140,7 @@ class Workspace:
 
         episode_step, episode_reward = 0, 0
         time_step = self.train_env.reset()
+        # obs = time_step.observation
         self.replay_storage.add(time_step)
         self.train_video_recorder.init(time_step.observation)
         metrics = None
@@ -156,6 +165,7 @@ class Workspace:
 
                 # reset env
                 time_step = self.train_env.reset()
+                # obs = time_step.observation
                 self.replay_storage.add(time_step)
                 self.train_video_recorder.init(time_step.observation)
                 # try to save snapshot
@@ -169,25 +179,41 @@ class Workspace:
                 self.logger.log('eval_total_time', self.timer.total_time(),
                                 self.global_frame)
                 self.eval()
-
+            # obs = time_step.observation
             # sample action
             with torch.no_grad(), utils.eval_mode(self.agent):
-                action = self.agent.act(time_step.observation,
-                                        self.global_step,
-                                        eval_mode=False)
+                if  self.global_step < 2000:
+                    action_spec = self.train_env.action_spec()
+                    action = np.random.uniform(action_spec.minimum,action_spec.maximum,
+                                size=action_spec.shape)
+                else:
+                    action = self.agent.select_action(time_step.observation)
+                action=action.astype(np.float32)
 
-            # try to update the agent
-            if not seed_until_step(self.global_step):
-                metrics = self.agent.update(self.replay_iter, self.global_step)
-                self.logger.log_metrics(metrics, self.global_frame, ty='train')
+
+
 
             # take env step
             time_step = self.train_env.step(action)
+         
+            # next_obs = time_step.observation
+            # reward = time_step.reward
+            # discount = time_step.discount
+            # self.agent.replay_buffer.add(obs,action,next_obs,reward,discount)
+ 
             episode_reward += time_step.reward
             self.replay_storage.add(time_step)
             self.train_video_recorder.record(time_step.observation)
             episode_step += 1
             self._global_step += 1
+
+                        # try to update the agent
+            if not seed_until_step(self.global_step) and not self.cfg.use_checkpoints:
+                metrics = self.agent.update(self.replay_iter,self.global_step)
+                self.logger.log_metrics(metrics, self.global_frame, ty='train')
+            if time_step.last():
+                if not seed_until_step(self.global_step) and self.cfg.use_checkpoints:
+                    self.agent.maybe_train_and_checkpoint(self.replay_iter,episode_step, episode_reward)
 
     def save_snapshot(self):
         snapshot = self.work_dir / 'snapshot.pt'

@@ -3,6 +3,7 @@ defaults:
   - task@_global_: quadruped_walk
   - override hydra/launcher: submitit_local
 
+use_checkpoints: True
 # task settings
 frame_stack: 3
 action_repeat: 2
@@ -10,7 +11,7 @@ discount: 0.99
 # train settings
 num_seed_frames: 4000
 # eval
-eval_every_frames: 10000
+eval_every_frames: 20000
 num_eval_episodes: 10
 # snapshot
 save_snapshot: false
@@ -22,7 +23,7 @@ batch_size: 256
 # misc
 seed: 1
 device: cuda
-save_video: true
+save_video: false
 save_train_video: false
 use_tb: true
 # experiment
